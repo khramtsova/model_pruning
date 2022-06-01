@@ -21,10 +21,11 @@ class Mask:
         self.norm_matrix = {}
 
         self.replace_matrix = {}
+        self.model = model
         self.args = hparams
 
-    def get_filter_topo(self, weight_torch, compress_rate, length,
-                        drop_per_epoch=0.02,
+    def get_filter_topo(self, weight_torch, length,
+                        drop_per_epoch=0.2,
                         dist_type="l2"):
         codebook = np.ones(length)
         filters_to_reinit = {}
@@ -34,7 +35,7 @@ class Mask:
 
             num_filters = weight_torch.size()[0]
             # how many to prune
-            similar_pruned_num = int(num_filters * compress_rate)
+            similar_pruned_num = int(num_filters * self.args.rate_dist)
             weight_vec = weight_torch.view(weight_torch.size()[0], -1)
 
             zero_mask = torch.count_nonzero(weight_vec, dim=1) == 0
@@ -87,8 +88,8 @@ class Mask:
         x = torch.FloatTensor(x)
         return x
 
-    def init_length(self, model, rate_norm_per_layer, rate_dist_per_layer):
-        for index, item in enumerate(model.parameters()):
+    def init_length(self):
+        for index, item in enumerate(self.model.parameters()):
             self.model_size[index] = item.size()
 
         for index1 in self.model_size:
@@ -98,12 +99,11 @@ class Mask:
                 else:
                     self.model_length[index1] *= self.model_size[index1][index2]
 
-        for index, item in enumerate(model.parameters()):
-            self.compress_rate[index] = 1
-            self.distance_rate[index] = 1
-        for key in range(self.args.layer_begin, self.args.layer_end + 1, self.args.layer_inter):
-            self.compress_rate[key] = rate_norm_per_layer
-            self.distance_rate[key] = rate_dist_per_layer
+        #for index, item in enumerate(model.parameters()):
+       #     self.compress_rate[index] = 1
+        #for key in range(self.args.layer_begin, self.args.layer_end + 1, self.args.layer_inter):
+        #    self.compress_rate[key] = rate_norm_per_layer
+
         # different setting for  different architecture
         if self.args.arch == 'resnet20':
             last_index = 57
@@ -117,24 +117,28 @@ class Mask:
         self.mask_index = [x for x in range(0, last_index, 3)]
 
 
-    def init_mask(self, dist_type, model):
+    def init_mask(self, dist_type, drop_per_epoch):
 
-        for index, item in enumerate(model.parameters()):
+        for index, item in enumerate(self.model.parameters()):
             if index in self.mask_index:
-                if index == 0:
-                    print("Before initialisation", item)
+                #if index == 0:
+                #    print("Before initialisation", item)
                 # mask for distance criterion
                 self.similar_matrix[index], self.replace_matrix[index] = self.get_filter_topo(item.data,
-                                                                                              self.distance_rate[index],
+                                                                                              # self.compress_rate[index],
                                                                                               self.model_length[index],
-                                                                                              dist_type=dist_type)
+                                                                                              drop_per_epoch=drop_per_epoch,
+                                                                                              dist_type=dist_type
+                                                                                              )
+                if index < 5:
+                    print("INDEX", self.similar_matrix[index])
                 #self.similar_matrix[index] = self.get_filter_similar(item.data, self.compress_rate[index],
                 #                                                      self.distance_rate[index],
                 #                                                     self.model_length[index], dist_type=dist_type)
                 self.similar_matrix[index] = self.convert2tensor(self.similar_matrix[index])
-                if self.args.gpus is not None:
-                    self.similar_matrix[index] = self.similar_matrix[index].cuda()
-        print("mask Ready")
+                #if self.args.gpus is not None:
+                self.similar_matrix[index] = self.similar_matrix[index].cuda()
+        # print("mask Ready")
 
     def do_similar_mask(self, model):
         for index, item in enumerate(model.parameters()):
@@ -148,7 +152,7 @@ class Mask:
         for index, item in enumerate(model.parameters()):
             if index in self.mask_index:
                 b = item.data.view(self.model_size[index][0], -1)
-                if len(self.replace_matrix[index].keys())>0:
+                if len(self.replace_matrix[index].keys()) > 0:
                     for filter_indx in self.replace_matrix[index].keys():
                         b[filter_indx] = self.replace_matrix[index][filter_indx]
                 item.data = b.view(self.model_size[index])
@@ -171,6 +175,7 @@ class Mask:
                 # reverse the mask of model
                 # b = a * (1 - self.mat[index])
                 # b = a * self.mat[index]
+
                 b = a * self.similar_matrix[index]
                 item.grad.data = b.view(self.model_size[index])
         return model

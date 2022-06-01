@@ -32,13 +32,15 @@ from pytorch_lightning.loggers import WandbLogger
 # from topo.topo_utils import get_diagrams_feature_vectors, wasserstein_d
 
 # RSC-related libraries
-from models.imagenet_resnet import resnet18, resnet50
-from models.cifar_resnet import resnet20, resnet32, resnet56
+from models.imagenet_resnet import resnet18, resnet50, resnet101
+from models.cifar_resnet import resnet20, resnet32, resnet56, resnet110
 from utils.utils import precisions
 
-# from pruning.pruning_geometric_mean_mine import Mask
-from pruning.pruning_geometric_mean_initial import Mask
+from pruning.pruning_geometric_mean_mine import Mask
+# from pruning.pruning_geometric_mean_initial import Mask
+# from pruning.pruning_from_scratch import Mask
 from data.CIFAR_data_module import CIFARDataModule
+from data.ImageNet_data_module import ImageNetDataModule
 
 # Topology-related libraries
 # from topo_utils.topo_freeze import TopoWeightFreezer, get_conv_list
@@ -51,30 +53,38 @@ class Net(pl.LightningModule):
         self.args = args
         self.save_hyperparameters()
 
+        # models for ImageNet
         if args.arch == 'resnet18':
-            net = resnet18(pretrained=False, classes=args.n_classes)
+            net = resnet18(pretrained=False, num_classes=args.n_classes)
         elif args.arch == 'resnet50':
-            net = resnet50(pretrained=False, classes=args.n_classes)
-        else:
-            net = resnet20(num_classes=args.n_classes)
-        net = net.cuda()
-        """
-        self.mask = Mask(net, args)
-        self.mask.init_length(net, args.rate_norm, args.rate_dist)
-        self.mask.init_mask( args.dist_type, net)
-        #    m.if_zero()
-        """
+            net = resnet50(pretrained=False, num_classes=args.n_classes)
 
+        # models for CIFAR10
+        elif args.arch == 'resnet20':
+            net = resnet20(num_classes=args.n_classes)
+        elif args.arch == 'resnet110':
+            net = resnet110(num_classes=args.n_classes)
+
+        self.net = net.cuda()
         self.mask = Mask(net, args)
+        self.mask.model = self.net
         self.mask.init_length()
-        self.mask.model = net
-        self.mask.init_mask(args.rate_norm, args.rate_dist, args.dist_type)
-        self.mask.do_mask()
+        self.net = self.mask.model.cuda()
+        # self.mask.init_mask(args.rate_norm, args.rate_dist, args.dist_type)
+        # self.mask.do_mask()
+        # self.mask.do_similar_mask()
+        """
+        self.mask.init_length()
+        self.mask.model = self.net
+        if self.args.random_drop:
+            self.mask.init_mask_random(args.rate_norm, args.rate_dist, args.dist_type)
+        else:
+            self.mask.init_mask(args.rate_norm, args.rate_dist, args.dist_type)
+        # self.mask.do_mask()
         self.mask.do_similar_mask()
-        self.net = self.mask.model
-        #    m.if_zero()
-        # net = self.mask.do_similar_mask(net)
-        # self.topo_weight_freezer = TopoWeightFreezer(self.net, persentage_to_freeze=args.freeze)
+        
+        self.net = self.mask.model.cuda()
+        """
 
         self.criterion = nn.CrossEntropyLoss()
         self.val_acc = torchmetrics.Accuracy()
@@ -82,13 +92,29 @@ class Net(pl.LightningModule):
 
     def configure_optimizers(self):
 
-        optimizer = optim.SGD(self.parameters(), weight_decay=.0005, momentum=self.args.momentum,
-                              nesterov=self.args.nesterov, lr=self.args.learning_rate)
+        optimizer = optim.SGD(self.parameters(),
+                              weight_decay=self.args.decay,
+                              momentum=self.args.momentum,
+                              nesterov=True,
+                              lr=self.args.learning_rate
+                              )
         # every 30 epochs - decrease by 0.1
-        scheduler = optim.lr_scheduler.MultiStepLR(optimizer,
-                                                   milestones=self.args.schedule,
-                                                   gamma=self.args.gammas)
+        # self.args.gammas = 0.1
 
+        if args.dataset == "imagenet":
+            scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
+
+        elif args.dataset == "cifar10":
+            def my_multistep_lr(epoch, schedule, gammas):
+                schedule = np.array(schedule)
+                gammas = np.array(gammas)
+                if epoch in schedule:
+                    assert len(gammas[schedule == epoch]) == 1
+                    return gammas[schedule == epoch][0]
+                else:
+                    return 1.
+            my_lambda = lambda epoch: my_multistep_lr(epoch, self.args.schedule, self.args.gammas)
+            scheduler = optim.lr_scheduler.MultiplicativeLR(optimizer, lr_lambda=my_lambda)
         return [optimizer], [scheduler]
 
     def on_train_start(self):
@@ -96,9 +122,9 @@ class Net(pl.LightningModule):
 
     def training_step(self, batch, batch_indx):
         input, target = batch
-        # self.net = self.mask.do_similar_mask(self.net)
+        if self.current_epoch > self.args.schedule[0]:
+            self.net = self.mask.do_similar_mask(self.net)
         output = self.net(input)
-        # for i in
         loss = self.criterion(output, target)
         prec1, prec5 = precision(output, target, top_k=1, num_classes=self.args.n_classes),  \
                        precision(output, target, top_k=5,  num_classes=self.args.n_classes)
@@ -111,8 +137,9 @@ class Net(pl.LightningModule):
 
     def on_before_optimizer_step(self, optimizer, optimizer_idx):
         # My version:
-        # self.net = self.mask.do_grad_mask(self.net)
-        self.mask.do_grad_mask()
+        if self.current_epoch > self.args.schedule[0]:
+            self.net = self.mask.do_grad_mask(self.net)
+        # self.mask.do_grad_mask()
 
     def validation_step(self, batch, batch_indx):
         input, target = batch
@@ -128,28 +155,39 @@ class Net(pl.LightningModule):
         self.log("val/acc", acc)
 
     def on_train_epoch_end(self):
-        self.mask.model = self.net
-        self.mask.if_zero()
-        self.mask.init_mask(args.rate_norm, args.rate_dist, args.dist_type)
-        self.mask.do_mask()
-        self.mask.do_similar_mask()
-        self.mask.if_zero()
-        self.net = self.mask.model
-        self.net = self.net.cuda()
+        """
+        if not self.args.random_drop:
+            self.mask.model = self.net
+            self.mask.if_zero()
+            self.mask.init_mask(self.args.rate_norm, self.args.rate_dist, self.args.dist_type)
+            # self.mask.do_mask()
+            self.mask.do_similar_mask()
+            self.mask.if_zero()
+            self.net = self.mask.model.cuda()
+        else:
+            self.mask.if_zero()
         """
         #  My version
-        if self.current_epoch > 5:
+        if self.current_epoch > self.args.schedule[0]:
+            self.net = self.mask.do_similar_mask(self.net)
+        if self.current_epoch in self.args.schedule[:-1]:
             # self.m.model = self.net
+            print("is zero prior")
             self.mask.if_zero(self.net)
-            self.net = self.mask.do_similar_mask(self.net)
 
-            self.mask.init_mask(args.dist_type, self.net)
+            self.mask.init_mask(args.dist_type, drop_per_epoch=0.2)
             # self.m.do_mask()
-            self.net = self.mask.do_similar_mask(self.net)
             self.net = self.mask.do_reinit(self.net)
+            self.net = self.mask.do_similar_mask(self.net)
             self.mask.if_zero(self.net)
+
+            #self.net = self.mask.model
             #self.net = self.m.model
-        """
+        else:
+            print("no zeroing")
+            self.mask.if_zero(self.net)
+
+
 
     def test_step(self, batch, batch_indx):
         input, target = batch
@@ -165,7 +203,7 @@ class Net(pl.LightningModule):
 
     @staticmethod
     def add_model_specific_args(parent_parser):
-        parser = argparse.ArgumentParser(description="Script to launch jigsaw training",
+        parser = argparse.ArgumentParser(# parents=[parent_parser],
                                          formatter_class=argparse.ArgumentDefaultsHelpFormatter)
         parser.add_argument('--data_path', default='/opt/data/CIFAR10/', type=str, help='Path to dataset')
         parser.add_argument('--arch', metavar='ARCH', default='resnet20', help='model architecture')
@@ -179,11 +217,11 @@ class Net(pl.LightningModule):
         parser.add_argument('--learning_rate', type=float, default=0.1, help='The Learning Rate.')
         parser.add_argument('--momentum', type=float, default=0.9, help='Momentum.')
         parser.add_argument('--decay', type=float, default=0.0005, help='Weight decay (L2 penalty).')
-        parser.add_argument('--nesterov', type=bool, default=False, help='Nesterov')
+        parser.add_argument('--nesterov', type=bool, default=True, help='Nesterov')
 
         parser.add_argument('--schedule', type=int, nargs='+', default=[60, 120, 160],
                             help='Decrease learning rate at these epochs.')
-        parser.add_argument('--gammas', type=float, nargs='+', default=0.2,
+        parser.add_argument('--gammas', type=float, nargs='+', default=[0.2, 0.2, 0.2],
                             help='LR is multiplied by gamma on schedule, number of gammas should be equal to schedule')
 
         # compress rate
@@ -205,6 +243,7 @@ class Net(pl.LightningModule):
         parser.add_argument('--pretrain_path', default='', type=str, help='..path of pre-trained model')
         parser.add_argument('--dist_type', default='l2', type=str, choices=['l2', 'l1', 'cos'],
                             help='distance type of GM')
+        parser.add_argument('--skip_downsample', type=int, default=1, help='compress layer of model')
 
         parser.add_argument("--num_workers", default=6, type=int, help="typically, the number of cpu")
 
@@ -212,9 +251,14 @@ class Net(pl.LightningModule):
         parser.add_argument("--topo_freeze", action='store_true', help="if topo_freeze is used")
 
         parser.add_argument("--log_dir", default='logs/DEL', help="Used by the logger to save logs")
+        parser.add_argument("--logger_type", default='tensorboard', help="tensorboard/ wandb")
+        parser.add_argument("--job_type", default='baseline', help="job type for the ")
+
         parser.add_argument("--freeze", default=0.3, type=float, help="freeze_percentage")
         parser.add_argument("--rand_seed", default=0, type=int, help="Random seed")
         parser.add_argument("--starting_epoch", default=1, type=int, help="Starting epoch to apply the freeze")
+
+        parser.add_argument("--random_drop", action='store_true', help="if randomly drop 40% of the filters is used")
         return parser
 
     @staticmethod
@@ -225,30 +269,40 @@ class Net(pl.LightningModule):
 
 if __name__ == "__main__":
     # main()
-    parser = argparse.ArgumentParser(description='PACS RSC training')
+    print("Lightning version", pl.__version__ )
+    parser = argparse.ArgumentParser(description='FPGM training')
     parser = Net.add_model_specific_args(parser)
     parser = Net.add_program_args(parser)
     parser = pl.Trainer.add_argparse_args(parser)
     args = parser.parse_args()
 
-    data = CIFARDataModule(args)
+    if args.dataset == "imagenet":
+        data = ImageNetDataModule(args)
+    elif args.dataset == "cifar10":
+        data = CIFARDataModule(args)
+    else:
+        raise "The dataset is unknown"
 
     image_model = Net(args=args)
-    """
-    logger = TensorBoardLogger(project='DEL',
-                               save_dir=args.log_dir,
-                               job_type='baseline',
-                               # entity='khramtsova',
-                               )
+    if args.logger_type == "wandb":
+        logger = WandbLogger(project='model_pruning',
+                             save_dir=args.log_dir,
+                             job_type=args.job_type,
+                             entity='khramtsova',
+                             )
+        # logger.watch(image_model)
+    elif args.logger_type == "tensorboard":
+        logger = TensorBoardLogger(save_dir=args.log_dir)
+    else:
+        logger = None
 
-    logger.watch(image_model,  log="all")
-    """
-    checkpoint_callback = ModelCheckpoint(# monitor="val_acc",
-                                          save_top_k=-1,
-                                          save_last=True,
+    checkpoint_callback = ModelCheckpoint(#monitor="val/acc",
+                                          #mode="max",
+                                          #save_last=True,
+                                          # save_top_k=1,
                                           # period=10,
-                                          every_n_epochs=1,
-                                          # mode="max"
+                                          save_top_k=-1,
+                                          # every_n_epochs=1,
                                           )
     trainer = pl.Trainer.from_argparse_args(args,
                                             #checkpoint_callback=checkpoint_callback,

@@ -2,12 +2,10 @@
 import torch
 import numpy as np
 from scipy.spatial import distance
-import random
-from gph.python import ripser_parallel
 
 
 class Mask:
-    def __init__(self, model, hparams):
+    def __init__(self, model, args):
         self.model_size = {}
         self.model_length = {}
         self.compress_rate = {}
@@ -20,8 +18,7 @@ class Mask:
         self.similar_matrix = {}
         self.norm_matrix = {}
 
-        self.args = hparams
-        self.filters_to_prune= {}
+        self.args = args
 
     def get_codebook(self, weight_torch, compress_rate, length):
         weight_vec = weight_torch.view(length)
@@ -35,7 +32,7 @@ class Mask:
         weight_np[weight_np >= threshold] = 1
         weight_np[weight_np != 1] = 0
 
-        print("codebook done")
+        # print("codebook done")
         return weight_np
 
     def get_filter_codebook(self, weight_torch, compress_rate, length):
@@ -77,6 +74,7 @@ class Mask:
             pass
         return filter_small_index, filter_large_index
 
+    # optimize for fast ccalculation
     def get_filter_similar(self, weight_torch, compress_rate, distance_rate, length, dist_type="l2"):
         codebook = np.ones(length)
         if len(weight_torch.size()) == 4:
@@ -119,23 +117,24 @@ class Mask:
             # for distance similar: get the filter index with largest similarity == small distance
             similar_large_index = similar_sum.argsort()[similar_pruned_num:]
             similar_small_index = similar_sum.argsort()[:  similar_pruned_num]
-
             similar_index_for_filter = [filter_large_index[i] for i in similar_small_index]
 
-            #print('filter_large_index', filter_large_index)
-            #print('filter_small_index', filter_small_index)
-            #print('similar_sum', np.sort(similar_sum))
-            #print('similar_large_index', similar_large_index)
-            #print('similar_small_index', similar_small_index)
-            # print('similar_index_for_filter', np.sort(similar_index_for_filter))
+            """
+            print('filter_large_index', filter_large_index)
+            print('filter_small_index', filter_small_index)
+            print('similar_sum', similar_sum)
+            print('similar_large_index', similar_large_index)
+            print('similar_small_index', similar_small_index)
+            print('similar_index_for_filter', similar_index_for_filter)
+            """
             kernel_length = weight_torch.size()[1] * weight_torch.size()[2] * weight_torch.size()[3]
             for x in range(0, len(similar_index_for_filter)):
                 codebook[
                 similar_index_for_filter[x] * kernel_length: (similar_index_for_filter[x] + 1) * kernel_length] = 0
-            # print("similar index done")
+            print("similar index done")
         else:
             pass
-        return codebook, similar_index_for_filter
+        return codebook
 
     def convert2tensor(self, x):
         x = torch.FloatTensor(x)
@@ -168,95 +167,33 @@ class Mask:
             last_index = 165
         elif self.args.arch == 'resnet110':
             last_index = 327
-
-        # ImageNet-related archs
-        elif self.args.arch == 'resnet18':
-            # last index include last fc layer
-            last_index = 60
-            skip_list = [21, 36, 51]
-        elif self.args.arch == 'resnet34':
-            last_index = 108
-            skip_list = [27, 54, 93]
-        elif self.args.arch == 'resnet50':
-            last_index = 159
-            skip_list = [12, 42, 81, 138]
-        elif self.args.arch == 'resnet101':
-            last_index = 312
-            skip_list = [12, 42, 81, 291]
-        elif self.args.arch == 'resnet152':
-            last_index = 465
-            skip_list = [12, 42, 117, 444]
+        # to jump the last fc layer
         self.mask_index = [x for x in range(0, last_index, 3)]
-        # skip downsample layer
-        if self.args.skip_downsample == 1:
-            for x in skip_list:
-                self.compress_rate[x] = 1
-                self.mask_index.remove(x)
-                # print(self.mask_index)
+
+    #        self.mask_index =  [x for x in range (0,330,3)]
 
     def init_mask(self, rate_norm_per_layer, rate_dist_per_layer, dist_type):
         self.init_rate(rate_norm_per_layer, rate_dist_per_layer)
         for index, item in enumerate(self.model.parameters()):
             if index in self.mask_index:
                 # mask for norm criterion
+                """
                 self.mat[index] = self.get_filter_codebook(item.data, self.compress_rate[index],
                                                            self.model_length[index])
                 self.mat[index] = self.convert2tensor(self.mat[index])
-                #if self.args.use_cuda:
                 self.mat[index] = self.mat[index].cuda()
-
+                """
                 # # get result about filter index
                 # self.filter_small_index[index], self.filter_large_index[index] = \
                 #     self.get_filter_index(item.data, self.compress_rate[index], self.model_length[index])
 
                 # mask for distance criterion
-                self.similar_matrix[index], filter_to_prune = self.get_filter_similar(item.data, self.compress_rate[index],
+                self.similar_matrix[index] = self.get_filter_similar(item.data, self.compress_rate[index],
                                                                      self.distance_rate[index],
                                                                      self.model_length[index], dist_type=dist_type)
-                if index in self.filters_to_prune.keys():
-                    # check if the value has changed
-                    if list(np.sort(self.filters_to_prune[index])) != list(np.sort(filter_to_prune)):
-                        print("The value of the filter", index, " has changed!")
-                        print(list(np.sort(self.filters_to_prune[index])))
-                        print(list(np.sort(filter_to_prune)))
-                        self.filters_to_prune[index] = filter_to_prune
-                else:
-                    print("New filters")
-                    self.filters_to_prune[index] = filter_to_prune
                 self.similar_matrix[index] = self.convert2tensor(self.similar_matrix[index])
-                #if self.args.use_cuda:
                 self.similar_matrix[index] = self.similar_matrix[index].cuda()
-        # print("mask Ready")
-
-    def init_mask_random(self, rate_norm_per_layer, rate_dist_per_layer, dist_type):
-        self.init_rate(rate_norm_per_layer, rate_dist_per_layer)
-        for index, item in enumerate(self.model.parameters()):
-            if index in self.mask_index:
-                weight_torch = item.data
-                codebook = np.ones(self.model_length[index])
-
-                rand_index_for_filter = list(np.arange(weight_torch.size()[0]))
-                random.shuffle(rand_index_for_filter)
-                similar_pruned_num = int(weight_torch.size()[0] * self.distance_rate[index])
-                rand_index_for_filter = rand_index_for_filter[:similar_pruned_num]
-                kernel_length = weight_torch.size()[1] * weight_torch.size()[2] * weight_torch.size()[3]
-                for x in range(0, len(rand_index_for_filter)):
-                    codebook[
-                    rand_index_for_filter[x] * kernel_length: (rand_index_for_filter[x] + 1) * kernel_length] = 0
-
-                self.similar_matrix[index] = codebook
-                self.similar_matrix[index] = self.convert2tensor(self.similar_matrix[index])
-                #if self.args.use_cuda:
-                self.similar_matrix[index] = self.similar_matrix[index].cuda()
-        print(self.similar_matrix)
-
-    def do_mask(self):
-        for index, item in enumerate(self.model.parameters()):
-            if index in self.mask_index:
-                a = item.data.view(self.model_length[index])
-                b = a * self.mat[index]
-                item.data = b.view(self.model_size[index])
-        #print("mask Done")
+        #print("mask Ready")
 
     def do_similar_mask(self):
         for index, item in enumerate(self.model.parameters()):
@@ -266,8 +203,8 @@ class Mask:
                 item.data = b.view(self.model_size[index])
         #print("mask similar Done")
 
-    def do_grad_mask(self):
-        for index, item in enumerate(self.model.parameters()):
+    def do_grad_mask(self, model):
+        for index, item in enumerate(model.parameters()):
             if index in self.mask_index:
                 a = item.grad.data.view(self.model_length[index])
                 # reverse the mask of model
@@ -275,8 +212,8 @@ class Mask:
                 # b = a * self.mat[index]
                 b = a * self.similar_matrix[index]
                 item.grad.data = b.view(self.model_size[index])
-        # return net
         # print("grad zero Done")
+        return model
 
     def if_zero(self):
         for index, item in enumerate(self.model.parameters()):
@@ -287,3 +224,4 @@ class Mask:
 
                 print(
                     "number of nonzero weight is %d, zero is %d" % (np.count_nonzero(b), len(b) - np.count_nonzero(b)))
+
