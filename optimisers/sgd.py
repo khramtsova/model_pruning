@@ -6,6 +6,7 @@ from typing import List, Optional
 
 class SGD(Optimizer):
     r"""Implements stochastic gradient descent (optionally with momentum).
+
     .. math::
        \begin{aligned}
             &\rule{110mm}{0.4pt}                                                                 \\
@@ -35,8 +36,10 @@ class SGD(Optimizer):
             &\bf{return} \:  \theta_t                                                     \\[-1.ex]
             &\rule{110mm}{0.4pt}                                                          \\[-1.ex]
        \end{aligned}
+
     Nesterov momentum is based on the formula from
     `On the importance of initialization and momentum in deep learning`__.
+
     Args:
         params (iterable): iterable of parameters to optimize or dicts defining
             parameter groups
@@ -49,30 +52,39 @@ class SGD(Optimizer):
             minimizing (default: False)
         foreach (bool, optional): whether foreach implementation of optimizer
             is used (default: None)
+
     Example:
         >>> optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
         >>> optimizer.zero_grad()
         >>> loss_fn(model(input), target).backward()
         >>> optimizer.step()
+
     __ http://www.cs.toronto.edu/%7Ehinton/absps/momentum.pdf
+
     .. note::
         The implementation of SGD with Momentum/Nesterov subtly differs from
         Sutskever et. al. and implementations in some other frameworks.
+
         Considering the specific case of Momentum, the update can be written as
+
         .. math::
             \begin{aligned}
                 v_{t+1} & = \mu * v_{t} + g_{t+1}, \\
                 p_{t+1} & = p_{t} - \text{lr} * v_{t+1},
             \end{aligned}
+
         where :math:`p`, :math:`g`, :math:`v` and :math:`\mu` denote the
         parameters, gradient, velocity, and momentum respectively.
+
         This is in contrast to Sutskever et. al. and
         other frameworks which employ an update of the form
+
         .. math::
             \begin{aligned}
                 v_{t+1} & = \mu * v_{t} + \text{lr} * g_{t+1}, \\
                 p_{t+1} & = p_{t} - v_{t+1}.
             \end{aligned}
+
         The Nesterov version is analogously modified.
     """
 
@@ -102,6 +114,7 @@ class SGD(Optimizer):
     @torch.no_grad()
     def step(self, closure=None):
         """Performs a single optimization step.
+
         Args:
             closure (callable, optional): A closure that reevaluates the model
                 and returns the loss.
@@ -165,6 +178,7 @@ def sgd(params: List[Tensor],
         nesterov: bool,
         maximize: bool):
     r"""Functional API that performs SGD algorithm computation.
+
     See :class:`~torch.optim.SGD` for details.
     """
 
@@ -191,6 +205,7 @@ def sgd(params: List[Tensor],
          has_sparse_grad=has_sparse_grad,
          maximize=maximize)
 
+
 def _single_tensor_sgd(params: List[Tensor],
                        d_p_list: List[Tensor],
                        momentum_buffer_list: List[Optional[Tensor]],
@@ -204,7 +219,9 @@ def _single_tensor_sgd(params: List[Tensor],
                        has_sparse_grad: bool):
 
     for i, param in enumerate(params):
-
+        print(i)
+        print(param)
+        raise()
         d_p = d_p_list[i]
         if weight_decay != 0:
             d_p = d_p.add(param, alpha=weight_decay)
